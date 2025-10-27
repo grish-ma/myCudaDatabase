@@ -39,6 +39,41 @@ class Table {
             // tableRows.push_back(columns); // Adding the first row as column name
         }
 
+        Table(Table& toCopy) : name("No Name"), numRows(toCopy.numRows), numCols(toCopy.numCols), colNames(toCopy.colNames)
+        {
+          
+        }
+
+        // TODO: Claude generated --  Convert 2D table to 1D array for GPU
+        vector<double> flatten() const {
+            vector<double> flat;
+            
+            // Go through every single value
+            for (const auto& row : tableRows) {
+                for (const auto& value : row)
+                {
+                    flat.push_back(stod(value));
+                }
+                // flat.insert(flat.end(), row.begin(), row.end());
+            }
+            return flat;
+        }
+
+        // TODO: Claude generated --  Convert 1D array back to Table
+        static Table* fromFlattened(vector<double>& flat, vector<string> cols, int rows) {
+            Table* t = new Table(cols);
+            int num_cols = cols.size();
+            for (int i = 0; i < rows; i++) {
+                vector<string> row;
+                for (int j = 0; j < num_cols; j++) {
+                    row.push_back(to_string(flat[i * num_cols + j]));
+                }
+                t->addRow(row);
+            }
+            return t;
+        }
+
+
         string getName()
         {
             return name;
@@ -424,7 +459,7 @@ void runCPU()
 
     // STEP 1: FILTER
     Table* solo_15 = cpu::filter(*table_2015, "2015_passenger_count", "1");
-        // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written15.csv", *solo_15);
+    writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written15.csv", *solo_15);
     Table* solo_16 = cpu::filter(*table_2016, "2016_passenger_count", "1");    
          // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written16.csv", *solo_16);
 
