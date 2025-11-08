@@ -321,7 +321,7 @@ namespace cpu
         }
         // Create a table from the hashTable
         Table* grouped = new Table({groupByCol, "aggregate"});
-        cout << endl << "groupBy = " << groupBy << endl;
+        // cout << endl << "groupBy = " << groupBy << endl;
 
         vector<string> temp;
 
@@ -346,7 +346,7 @@ namespace cpu
             }
             grouped->addRow(temp);
         }        
-        grouped->printTable();
+        // grouped->printTable();
         return grouped;
     }
 
@@ -447,35 +447,47 @@ namespace gpu {
 void runCPU()
 {
     // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2015-01.csv", 300);
+    Table* table_2015 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2015-01.csv", 500);
     table_2015->appendStringtoColumns("2015");
 
-    Table* table_2016 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2016-01.csv", 300);
+    Table* table_2016 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2016-01.csv", 500);
     table_2016->appendStringtoColumns("2016");
 
     // START CLOCK
     // BENCHMARK THE CPU
-    auto start = chrono::high_resolution_clock::now();
-
+    auto startFilter = chrono::high_resolution_clock::now();
     // STEP 1: FILTER
     Table* solo_15 = cpu::filter(*table_2015, "2015_passenger_count", "1");
+    auto endFilter = chrono::high_resolution_clock::now();
+    auto usFilter = std::chrono::duration_cast<chrono::microseconds>(endFilter - startFilter);
+    cout << endl << endl << "CPU Time to Filter 2015 table: " << usFilter.count() << " μs \n";
+    cout << "Number of rows = " << (solo_15->getNumRows()) << endl;
+
     writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written15.csv", *solo_15);
     Table* solo_16 = cpu::filter(*table_2016, "2016_passenger_count", "1");    
          // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written16.csv", *solo_16);
 
-    // STEP 2: JOIN - Joining January 2015 and 2016 data for single passengers
+   
+    
+         // STEP 2: JOIN - Joining January 2015 and 2016 data for single passengers
     // TODO: potentially create a new column with location + distance as a joiner.
+    auto startJoin = chrono::high_resolution_clock::now();
     Table* joined = cpu::hash_join(*solo_15, *solo_16, "2015_trip_distance", "2016_trip_distance");
         // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/joined.csv", *joined); // joined->printTable();
-
+    auto endJoin = chrono::high_resolution_clock::now();
+    auto msJoin = std::chrono::duration_cast<std::chrono::milliseconds>(endJoin - startJoin);
+    cout << endl << endl << "CPU Time to Hash Join 2015 and 2016 tables: " << msJoin.count() << " ms\n";
 
     // STEP 3: AGGREGATE
+
+    auto startAgg = chrono::high_resolution_clock::now();
     Table* agg = cpu::aggregate(*joined, "2015_VendorID", "2015_fare_amount", AVG);
         // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/aggregate.csv", *agg); // joined->printTable();
-    auto end = chrono::high_resolution_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    cout << endl << endl << "CPU Time: " << ms.count() << " ms\n";
-
+    auto endAgg = chrono::high_resolution_clock::now();
+    auto msAgg = std::chrono::duration_cast<std::chrono::milliseconds>(endAgg - startAgg);
+    cout << endl << endl << "CPU Time to Aggregate joined table: " << msJoin.count() << " ms\n";
+    agg->printTable();
+    
     
     // Clean up memory
     delete table_2015;

@@ -37,16 +37,17 @@ class Table {
 
         Table(Table& toCopy) : name("No Name"), numRows(toCopy.numRows), numCols(toCopy.numCols), colNames(toCopy.colNames)
         {
-          
+
         }
 
         vector<double> flatten() const {
             vector<double> flat;
-            
+
             // Go through every single value
             for (const auto& row : tableRows) {
                 for (const auto& value : row)
                 {
+                  // cout << "value: " << value << endl;
                     flat.push_back(stod(value));
                 }
                 // flat.insert(flat.end(), row.begin(), row.end());
@@ -207,7 +208,7 @@ Table* loadCSV(string filepath, int maxRows, vector<string> columnsToLoad)
     getline(inputFile, columnString);
     vector<string> csvColumns = split(columnString, ',');
     vector<int> column_indices;
-    
+
     // Find indices of columns we want to load
     for (int i = 0; i < csvColumns.size(); i++)
     {
@@ -231,7 +232,7 @@ Table* loadCSV(string filepath, int maxRows, vector<string> columnsToLoad)
         // cout << "line: " << line << endl;
         // Delimter = ','
         vector<string> allRowValues = split(line, ',');
-        
+
         // Only extract columns specified in column_indices
         vector<string> filteredRowValues;
         for (int idx : column_indices)
@@ -241,7 +242,7 @@ Table* loadCSV(string filepath, int maxRows, vector<string> columnsToLoad)
                 filteredRowValues.push_back(allRowValues[idx]);
             }
         }
-        
+
         newTable->addRow(filteredRowValues);
         maxRows--;
     }
@@ -270,7 +271,7 @@ Table* loadCSV(string filepath, int maxRows)
     while (maxRows > 0 && getline(inputFile, line)) {
         // Process each line here
         // cout << "line: " << line << endl;
-        // Delimter = ','
+        // Delimiter = ','
         vector<string> rowValues = split(line, ',');
         newTable->addRow(rowValues);
         maxRows--;
@@ -297,14 +298,14 @@ void filter_kernel(double* toFilter, double* filtered, double target, int column
   {
     flatIndex = i * numCols + column; // looks directly at the relevant column
    // if (toFilter[flatIndex] == target) // too extract
-   if (fabs(toFilter[flatIndex] - target) < 1e-6)
+   if (fabs(toFilter[flatIndex] - target) < 0.1)
     {
       int pos = atomicAdd(count, 1); // added a row to the filtered table. cannot do count++ in GPU.
       for (int j = 0; j < numCols; j++)
       {
         filtered[pos*numCols + j] = toFilter[i*numCols + j]; // Can't use push_back() because GPU doesn't work with dynamic memories
       }
-      
+
     }
   }
 
@@ -317,23 +318,33 @@ namespace gpu
     // The following methods will call the relevant kernels, figuring out the correct number of blocks, threads, etc.
     Table* filter(Table& toFilter, string column, string target)
     {
+        // TIME THE GPU - including memory transfer
+        auto startMem = chrono::high_resolution_clock::now();
+
         Table* result = new Table(toFilter.getAllCols());
         // need to flatten our Tables to 1D.
         vector<double> flat = toFilter.flatten(); // return vector<double> since GPU cannot process strings
-
 
         // Create pointers in the GPU. Parameters of the filter_kernel()
         double* toFilter_ptr;
         double* filtered_ptr; // Will point to the filtered table
 
-        // cout << "target: " << target << endl;
+            // cout << "target: " << target << endl;
         double target_dbl; // = stod(target); // convert target value to double // value doesn't change
         try { target_dbl = stod(target); } catch(...) { target_dbl = 0.0; cerr << "Trying to convert a non-numeric value to a double.";}
         int colIndex = toFilter.getColumnIndex(column); // no pointer because it's value doesn't need to change
+        cout << "colIndex: " << colIndex << endl;
         int num_rows = toFilter.getNumRows(); // value doesn't change
         int num_cols = toFilter.getNumCols(); // value doesn't change
         int* d_count; // Keeps count of the number of rows in the filtered table.
-        
+
+        // TODO CHAT CODE
+        cout << "num_rows=" << num_rows << " num_cols=" << num_cols << " flat.size()=" << flat.size() << endl;
+        if (!flat.empty()) {
+          cout << "flat[0..min(5,flat.size()-1)]: ";
+          for (int k=0;k<min((size_t)5, flat.size()); ++k) cout << flat[k] << " ";
+          cout << endl;
+        }
 
 
         // Allocate Memory in the GPU for all the pointers
@@ -349,7 +360,7 @@ namespace gpu
 
 
         // Copy the vectors into the GPU
-        // cudaMemcpy	(	void * 	dst, const void * 	src, size_t 	count, enum cudaMemcpyKind 	kind)	
+        // cudaMemcpy	(	void * 	dst, const void * 	src, size_t 	count, enum cudaMemcpyKind 	kind)
               // cudaMemcpy(dst, src, N * sizeof(type), kind); → type = type of DATA being copied
         cudaMemcpy(toFilter_ptr, flat.data(), flat.size() * sizeof(double), cudaMemcpyHostToDevice);
                               // ^ flat.data() returns the pointer to flat
@@ -361,9 +372,50 @@ namespace gpu
         // TODO: UNDERSTAND # OF THREADS AND BLOCKS
         int threads = 256;
         int blocks = (num_rows + threads - 1) / threads;
+
+  // TIMING PURPOSES
+        // Create CUDA events
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+      // Record start
+        cudaEventRecord(start);
+        // This is where the actual filtering happens
         // filter_kernel(double* toFilter, double* filtered, double target, int column, int numRows, int numCols, int count)
+      // Clock start
+        auto startFilter = chrono::high_resolution_clock::now();
+        
         filter_kernel<<<blocks, threads>>>(toFilter_ptr, filtered_ptr, target_dbl, colIndex, num_rows, num_cols, d_count);
         cudaDeviceSynchronize();
+        
+      // Record end
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        
+      // Clock end  
+        auto endFilter = chrono::high_resolution_clock::now();
+    
+
+      // Calculating Clock Time
+        auto msFilter = std::chrono::duration_cast<std::chrono::milliseconds>(endFilter - startFilter);
+        cout << endl << endl << "GPU Time to Filter 2015 table: " << msFilter.count() << " ms\n";
+        msFilter = std::chrono::duration_cast<std::chrono::milliseconds>(endFilter - startMem);
+        cout << endl << endl << "GPU Time to Filter 2015 table With Memory Transfer: " << msFilter.count() << " ms\n";
+      // Calculating CUDA Event Time
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start, stop);
+
+        cout << "GPU Kernel Time: " << ms << " ms\n";
+
+        // Cleanup
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            cout << "CUDA Error: " << cudaGetErrorString(err) << endl;
+        }
 
 
 
@@ -372,10 +424,13 @@ namespace gpu
         int resultCount;
         cudaMemcpy(&resultCount, d_count, sizeof(int), cudaMemcpyDeviceToHost);
         // Using resultCount to copy the filtered table
-        cout << "resultCount: " << resultCount << endl;
+        // cout << "resultCount: " << resultCount << endl;
         vector<double> flatResult = vector<double>(resultCount * num_cols);
         cudaMemcpy(flatResult.data(), filtered_ptr, flatResult.size()*sizeof(double), cudaMemcpyDeviceToHost);
 
+        cudaFree(toFilter_ptr);
+        cudaFree(filtered_ptr);
+        cudaFree(d_count);
 
 
 
@@ -389,17 +444,20 @@ namespace gpu
 void runGPU()
 {
     // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 20, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 800, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     table_2015->appendStringtoColumns("2015");
+            // table_2015->printTable();
+    cout << endl << "value = " << table_2015->getValue(0, 1) << endl;
 
-    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 20, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 800, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     table_2016->appendStringtoColumns("2016");
-    // START CLOCK
-    // TIME THE GPU
-    auto start = chrono::high_resolution_clock::now();
+
+    
     // STEP 1: FILTER
     Table* solo_15 = gpu::filter(*table_2015, "2015_passenger_count", "1");
     solo_15->printTable();
+
+
     // Table* solo_16 = gpu::filter(*table_2016, "2016_passenger_count", "1");
 }
 
