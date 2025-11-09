@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <numeric>
 #include <chrono>
+#include <math.h>
 
 // #include "cuda_runtime.h"
 // #include "device_launch_parameters.h"
@@ -297,7 +298,7 @@ void filter_kernel(double* toFilter, double* filtered, double target, int column
   if(i < numRows)
   {
     flatIndex = i * numCols + column; // looks directly at the relevant column
-   // if (toFilter[flatIndex] == target) // too extract
+   // if (toFilter[flatIndex] == target) // too exact
    if (fabs(toFilter[flatIndex] - target) < 0.1)
     {
       int pos = atomicAdd(count, 1); // added a row to the filtered table. cannot do count++ in GPU.
@@ -311,9 +312,208 @@ void filter_kernel(double* toFilter, double* filtered, double target, int column
 
   return;
 }
+__global__  // Making wider rows based on column value
+void hash_join_kernel(
+    int* count, // for atomicAdd to keep track of output indices
+    double* tableTwo, // Table we are trying to join to hashTable
+    int column2, // Relevant column index in table two
+    double* keys, // exising keys in hashtable from table one
+    double* outputKeys, // output keys from table two
+    double* values, // exising values
+    double* outputValues, // output values
+    int tableSize, // number of rows/keys/values in hashtable
+    int numColsOne,
+    int numColsTwo, // number of columns in table two
+    int numRowsTwo) // number of rows in table two
+{
+    int i = threadIdx.x + blockIdx.x*blockDim.x; // i gives us the row that this thread is handling
+    int outCols = numColsOne + numColsTwo - 1;
 
+
+    if(i >= numRowsTwo)
+      return;
+
+    int flatIndex = i * numColsTwo + column2; // looks directly at the relevant column in flattened tableTwo
+    double key = tableTwo[flatIndex]; // key for second table
+
+    for (int k = 0; k < tableSize; k++) // Going through all the rows of the hashTable/tableOne
+    {
+        if (fabs(key-keys[k]) < 0.1)
+        {
+            int pos = atomicAdd(count, 1); // added a row to the output table. cannot do count++ in GPU.
+            if (pos >= numRowsTwo) {
+                // avoid overflow
+                return;
+            }
+
+
+            outputKeys[pos] = key;
+            // Copying table two row to output
+            for (int j = 0; j < numColsOne; j++)
+            {
+                outputValues[pos*(outCols) + j] = values[k*(numColsOne) + j]; // Can't use push_back() because GPU doesn't work with dynamic memories
+            }
+
+            // copy tableTwo row except the join column (use i)
+            int base = pos*(outCols);
+            int dst = base + numColsOne;
+            for (int j = 0; j < numColsTwo; ++j) {
+                if (j == column2) continue;
+                outputValues[dst++] = tableTwo[i * numColsTwo + j];
+            }
+
+            // Copying table two row to output
+//            for (int j = numColsOne; j < outCols; j++)
+//            {
+//                outputValues[pos*(outCols) + j] = tableTwo[i*(numColsTwo) + j]; // Can't use push_back() because GPU doesn't work with dynamic memories
+//
+//            }
+        }
+    }
+    return;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
 namespace gpu
 {
+
+    Table* hash_join(Table& tableOne, Table& tableTwo, string columnIndex1, string columnIndex2)
+    {
+        cout << "Here I am!" << endl;
+        // Flatten our Tables to 1D // return vector<double> since GPU cannot process strings
+        vector<double> flatOne = tableOne.flatten();
+        vector<double> flatTwo = tableTwo.flatten();
+
+  // CPU Code to create hashtable ///////////////////////////////////////////////////////////////
+        // TO-DO -- do this hashtable thing in the GPU
+        int colIndex1 = tableOne.getColumnIndex(columnIndex1);
+        int colIndex2 = tableTwo.getColumnIndex(columnIndex2);
+        cout << "Finding columns" << columnIndex1 << "=" << colIndex1 << " and " << columnIndex2 << "=" << colIndex2 << endl;
+
+        if (colIndex1 == -1 || colIndex2 == -1)
+        {
+            cout << "No column named " << columnIndex1 << " or " << columnIndex2 << " exists " << endl;
+            return nullptr;
+        }
+        vector<string> newCols = tableOne.getAllCols();
+        vector<string> twoCols = tableTwo.getAllCols();
+        // Concatenate the columns from both tables:
+        newCols.insert(newCols.end(), twoCols.begin(), twoCols.end());
+        // Removing the duplicate column:
+        newCols.erase(newCols.begin() + colIndex1);
+        cout << "newCols.size() = " << newCols.size() << endl;
+        
+        Table* joined = new Table(newCols);
+        // unordered_map<string, vector<vector<string>>> hashTable;
+        vector<double> vectorHashKeys;
+        Table* vectorHashValues = new Table(tableOne.getAllCols()); // Will contain all the row indices from tableOne
+        
+        // Go through tableOne and store all the elements in the
+        // right spots based on the given colIndex
+        // + Now convert to what we can use in the GPU.
+        for (const auto& row : tableOne.getAllRows())
+        // for (int r = 0; r < tableOne.getNumRows(); r++)
+        {
+            // const auto& row = tableOne.getRow(r);
+            string key = row[colIndex1];
+           // cout << "key = " << key << endl;
+
+            // Use the value in the given column as the hash key
+            // hashTable[key].push_back(row);
+            vectorHashKeys.push_back(stod(key)); //  only recording row index in hashtable
+            vectorHashValues->addRow(row); // pushing entire row
+        }
+        cout << "hello...??" << endl;
+        vector<double> flatValues = vectorHashValues->flatten();
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+        cout << "bob ross" << endl;
+        // Create pointers in the GPU. Parameters of the hash_join_kernel(). If its value doesn't need to change, don't need a pointer.
+        // Any output values you want should be pointers and sent as parameters to __global__ function
+        int* d_count;
+        double* tableTwo_ptr;
+        double* keys_ptr;
+        double* outKeys_ptr;
+        double* values_ptr;
+        double* outValues_ptr;
+
+        // Allocate Memory in the GPU for all the pointers: cudaMalloc(&ptr, N * sizeof(type)); → type = type of ELEMENTS, size = # of bytes = # of elements * sizeof(double)
+        cout << "alok" << endl;
+        cudaMalloc(&tableTwo_ptr, flatTwo.size() * sizeof(double));
+        cudaMalloc(&keys_ptr, vectorHashKeys.size()*sizeof(double));
+              int maxOutRows = tableTwo.getNumRows();
+        cudaMalloc(&outKeys_ptr, sizeof(double) * maxOutRows);
+                            // int maxOutSize = flatValues.size() + flatTwo.size();  
+                            // cudaMalloc(&outKeys_ptr, (maxOutSize)*sizeof(double));
+            // Allocating max size possible
+        cudaMalloc(&values_ptr, flatValues.size()*sizeof(double));
+        cudaMalloc(&outValues_ptr, sizeof(double) * maxOutRows * newCols.size());
+
+        
+                            // cudaMalloc(&outValues_ptr, flatValues.size()*sizeof(double));
+            // Allocating max size possible
+        cudaMalloc(&d_count, sizeof(int));
+            cudaMemset(d_count, 0, sizeof(int)); // initialize to 0
+        cout << "Rock climbing" << endl;
+        // Copy the vectors into the GPU using cudaMemcpy(..., cudaMemcpyHostToDevice)
+            // Only need to copy input values, not empty output pointers
+        cudaMemcpy(tableTwo_ptr, flatTwo.data(), flatTwo.size()*sizeof(double), cudaMemcpyHostToDevice);
+        cudaMemcpy(keys_ptr, vectorHashKeys.data(), vectorHashKeys.size()*sizeof(double), cudaMemcpyHostToDevice);
+        cudaMemcpy(values_ptr, flatValues.data(), flatValues.size()*sizeof(double), cudaMemcpyHostToDevice);
+
+        // Call the kernel function
+     //   int threads = tableTwo.getNumRows();
+      //  int blocks = 1; //(num_rows + threads - 1) / threads;
+        int threads = 256; 
+        int blocks = (tableTwo.getNumRows() + threads - 1) / threads;
+        cout << "Before the kernel " << endl;
+        hash_join_kernel<<<blocks, threads>>>(
+            d_count,
+            tableTwo_ptr,
+            colIndex2,
+            keys_ptr,
+            outKeys_ptr,
+            values_ptr,
+            outValues_ptr,
+            vectorHashKeys.size(),
+            tableOne.getNumCols(),
+            tableTwo.getNumCols(),
+            tableTwo.getNumRows());
+        cudaDeviceSynchronize();
+
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            cout << "CUDA Error: " << cudaGetErrorString(err) << endl;
+        }
+
+        // Copy results back to CPU using cudaMemcpy(..., cudaMemcpyDeviceToHost)
+        int resultCount;
+        cudaMemcpy(&resultCount, d_count, sizeof(int), cudaMemcpyDeviceToHost);
+        // vector<double> keysResult = vector<double>(resultCount);
+        vector<double> valuesResult = vector<double>(resultCount);
+        // cudaMemcpy(keysResult.data(), outKeys_ptr, keysResult.size()*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(valuesResult.data(), outValues_ptr, resultCount*sizeof(double), cudaMemcpyDeviceToHost);
+
+
+        cudaFree(d_count);
+        cudaFree(tableTwo_ptr);
+        cudaFree(keys_ptr);
+        cudaFree(outKeys_ptr);
+        cudaFree(values_ptr);
+        cudaFree(outValues_ptr); // Free all pointers
+
+
+        // Unflatten Tables if needed
+        cout << "Before unflattening table" << endl;
+        joined = Table::fromFlattened(valuesResult, newCols, resultCount);
+        cout << "After unflattening table" << endl;
+
+        return joined;
+    }
+
+
     // "SELECT" Filter based on column value
     // The following methods will call the relevant kernels, figuring out the correct number of blocks, threads, etc.
     Table* filter(Table& toFilter, string column, string target)
@@ -339,9 +539,9 @@ namespace gpu
         int* d_count; // Keeps count of the number of rows in the filtered table.
 
         // TODO CHAT CODE
-        cout << "num_rows=" << num_rows << " num_cols=" << num_cols << " flat.size()=" << flat.size() << endl;
+        // cout << "num_rows=" << num_rows << " num_cols=" << num_cols << " flat.size()=" << flat.size() << endl;
         if (!flat.empty()) {
-          cout << "flat[0..min(5,flat.size()-1)]: ";
+          // cout << "flat[0..min(5,flat.size()-1)]: ";
           for (int k=0;k<min((size_t)5, flat.size()); ++k) cout << flat[k] << " ";
           cout << endl;
         }
@@ -385,23 +585,30 @@ namespace gpu
         // filter_kernel(double* toFilter, double* filtered, double target, int column, int numRows, int numCols, int count)
       // Clock start
         auto startFilter = chrono::high_resolution_clock::now();
-        
-        filter_kernel<<<blocks, threads>>>(toFilter_ptr, filtered_ptr, target_dbl, colIndex, num_rows, num_cols, d_count);
+
+        filter_kernel<<<blocks, threads>>>(
+            toFilter_ptr,
+            filtered_ptr,
+            target_dbl,
+            colIndex,
+            num_rows,
+            num_cols,
+            d_count);
         cudaDeviceSynchronize();
-        
+
       // Record end
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
-        
-      // Clock end  
+
+      // Clock end
         auto endFilter = chrono::high_resolution_clock::now();
-    
+
 
       // Calculating Clock Time
         auto msFilter = std::chrono::duration_cast<std::chrono::milliseconds>(endFilter - startFilter);
-        cout << endl << endl << "GPU Time to Filter 2015 table: " << msFilter.count() << " ms\n";
+      //  cout << endl << endl << "GPU Time to Filter table: " << msFilter.count() << " ms\n";
         msFilter = std::chrono::duration_cast<std::chrono::milliseconds>(endFilter - startMem);
-        cout << endl << endl << "GPU Time to Filter 2015 table With Memory Transfer: " << msFilter.count() << " ms\n";
+        cout << endl << endl << "GPU Time to Filter table With Memory Transfer: " << msFilter.count() << " ms\n";
       // Calculating CUDA Event Time
         float ms = 0;
         cudaEventElapsedTime(&ms, start, stop);
@@ -432,8 +639,6 @@ namespace gpu
         cudaFree(filtered_ptr);
         cudaFree(d_count);
 
-
-
         // Convert back to a table
         result = Table::fromFlattened(flatResult, toFilter.getAllCols(), resultCount);
 
@@ -444,25 +649,30 @@ namespace gpu
 void runGPU()
 {
     // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 800, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 50, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     table_2015->appendStringtoColumns("2015");
             // table_2015->printTable();
     cout << endl << "value = " << table_2015->getValue(0, 1) << endl;
 
-    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 800, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 50, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     table_2016->appendStringtoColumns("2016");
 
-    
+
     // STEP 1: FILTER
     Table* solo_15 = gpu::filter(*table_2015, "2015_passenger_count", "1");
-    solo_15->printTable();
+      // solo_15->printTable();
+    Table* solo_16 = gpu::filter(*table_2016, "2016_passenger_count", "1");
+      // solo_16->printTable();
 
 
-    // Table* solo_16 = gpu::filter(*table_2016, "2016_passenger_count", "1");
+    // STEP 2: JOIN
+    Table* joined = gpu::hash_join(*solo_15, *solo_16, "2015_trip_distance", "2016_trip_distance");
+    joined->printTable();
+    cout << endl << "Test" << endl;
 }
 
 int main()
 {
-  runGPU();
-  return 0;
+    runGPU();
+    return 0;
 }
