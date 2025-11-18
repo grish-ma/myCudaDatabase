@@ -497,7 +497,7 @@ namespace gpu
         // Calculating CUDA Event Time
         float ms = 0;
         cudaEventElapsedTime(&ms, start, stop);
-        cout << "GPU Hash Join Kernel Time: " << ms << " ms\n";
+        cout << endl << endl << "GPU Hash Join Kernel Time: " << ms << " ms\n";
 
         // Cleanup
         cudaEventDestroy(start);
@@ -705,6 +705,10 @@ void runGPU()
     // STEP 2: JOIN
     Table* joined = gpu::hash_join(*solo_15, *solo_16, "2015_trip_distance", "2016_trip_distance");
     // joined->printTable();
+
+    // STEP 3: AGGREGATE
+    Table* agg = gpu::aggregate(*joined, "2015_VendorID", "2015_fare_amount", AVG);
+    // agg->printTable();
 }
 
 int main()

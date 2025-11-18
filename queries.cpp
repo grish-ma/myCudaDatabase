@@ -1,3 +1,4 @@
+%%writefile queries.cpp
 // Queries to write:
 
 // Version 1 -- 
@@ -44,7 +45,10 @@ class Table {
           
         }
 
-        // TODO: Claude generated --  Convert 2D table to 1D array for GPU
+        // Destructor - vectors will automatically clean up
+        ~Table() = default;
+
+        // Converting 2D table to 1D array for GPU
         vector<double> flatten() const {
             vector<double> flat;
             
@@ -111,7 +115,8 @@ class Table {
             return -1;
         }
 
-        vector<string> getAllCols()
+        // Return const reference to avoid expensive copying
+        const vector<string>& getAllCols() const
         {
             return colNames;
         }
@@ -124,11 +129,11 @@ class Table {
             return tableRows[index];
         }
 
-        vector<vector<string>> getAllRows()
+        // Return const reference to avoid expensive copying
+        const vector<vector<string>>& getAllRows() const
         {
             if (numRows == 0)
                 cout << endl << endl << "numRows = 0"  << endl << endl;
-            //     return nullptr; // 
             return tableRows;
         }
 
@@ -230,6 +235,65 @@ Table* loadCSV(string filepath, int maxRows)
     return newTable;
 }
 
+// Load chosen columns
+Table* loadCSV(string filepath, int maxRows, vector<string> columnsToLoad)
+{
+    ifstream inputFile(filepath);
+    // Check if the CSV opened successfully
+    if (!inputFile.is_open()) {
+        cerr << "Error opening file!" << endl;
+        return nullptr; // Or handle the error appropriately
+    }
+
+    string columnString;
+    getline(inputFile, columnString);
+    vector<string> csvColumns = split(columnString, ',');
+    vector<int> column_indices;
+
+    // Find indices of columns we want to load
+    for (int i = 0; i < csvColumns.size(); i++)
+    {
+        // Check if the current CSV column is one we want to load
+        for (const string& targetCol : columnsToLoad)
+        {
+            if (csvColumns[i] == targetCol)
+            {
+                column_indices.push_back(i);
+                break;
+            }
+        }
+    }
+
+    // Create table with only certain columns in the CSV
+    Table* newTable = new Table(columnsToLoad);
+
+    string line;
+    while (maxRows > 0 && getline(inputFile, line)) {
+        // Process each line here
+        // cout << "line: " << line << endl;
+        // Delimter = ','
+        vector<string> allRowValues = split(line, ',');
+
+        // Only extract columns specified in column_indices
+        vector<string> filteredRowValues;
+        for (int idx : column_indices)
+        {
+            if (idx < allRowValues.size())
+            {
+                filteredRowValues.push_back(allRowValues[idx]);
+            }
+        }
+
+        newTable->addRow(filteredRowValues);
+        maxRows--;
+    }
+    // newTable->printTable();
+
+    inputFile.close();
+    return newTable;
+}
+
+
 void writeCSV(string filepath, Table& toWrite)
 {
     ofstream outputFile(filepath, ios::out);
@@ -271,9 +335,14 @@ namespace cpu
         }
 
         // Go through each row in the original table, look at the value in the relevant column
-        Table* filtered = new Table(toFilter.getAllCols()); // Make a new table with the same column names
-        vector<string> tempRow = {};
-        for (const auto& tempRow : toFilter.getAllRows())
+        const vector<string>& cols = toFilter.getAllCols();
+        Table* filtered = new Table(cols); // Make a new table with the same column names
+        const vector<vector<string>>& allRows = toFilter.getAllRows();
+        
+        // Pre-allocate space to reduce reallocations (estimate ~50% match rate)
+        // Access private member through a workaround - we'll use reserve if we add a method
+        // For now, just iterate efficiently
+        for (const auto& tempRow : allRows)
         {
             if (tempRow[columnIndex] == target)
                 filtered->addRow(tempRow);
@@ -281,18 +350,12 @@ namespace cpu
         return filtered;
     }
 
-    vector<string> combineRows(vector<string> existingRow, vector<string> rowToAdd)
+    vector<string> combineRows(const vector<string>& existingRow, const vector<string>& rowToAdd)
     {
         vector<string> combined;
-        for (const auto& s: existingRow) // This const format shows that we do not want to edit the variable, just read it.
-        {
-            combined.push_back(s);
-        }
-        for (const auto& s : rowToAdd)
-        {
-            combined.push_back(s);
-        }
-
+        combined.reserve(existingRow.size() + rowToAdd.size());
+        combined.insert(combined.end(), existingRow.begin(), existingRow.end());
+        combined.insert(combined.end(), rowToAdd.begin(), rowToAdd.end());
         return combined;        
     }
 
@@ -312,7 +375,8 @@ namespace cpu
                      // key      // value
 
         // TODO: Currently not taking any other functions, just summing them up
-        for(vector<string> row : toGroup.getAllRows())
+        const vector<vector<string>>& allRows = toGroup.getAllRows();
+        for(const auto& row : allRows)
         {
             string key = row[groupBy]; // The value in the relevant column = key
             hashTable[key].push_back(stoi(row[toAgg])); 
@@ -362,39 +426,48 @@ namespace cpu
         vector<string> twoCols = tableTwo.getAllCols();
         // Concatenate the columns from both tables:
         newCols.insert(newCols.end(), twoCols.begin(), twoCols.end());
-        // Removing the duplicate column:
-        newCols.erase(newCols.begin() + colIndex1); 
+        // Removing the duplicate column from tableTwo (not tableOne):
+        newCols.erase(newCols.begin() + tableOne.getNumCols() + colIndex2); 
 
         Table* joined = new Table(newCols);
-        unordered_map<string, vector<vector<string>>> hashTable;
+        // OPTIMIZATION: Store row indices instead of full rows to save memory
+        unordered_map<string, vector<int>> hashTable;
 
-        // go through tableOne and insert all the elements in the
-        // right spots based on the given colIndex
-        for (const auto& row : tableOne.getAllRows())
+        // go through tableOne and store row indices instead of full rows
+        const vector<vector<string>>& tableOneRows = tableOne.getAllRows();
+        for (int i = 0; i < tableOneRows.size(); i++)
         {
-            string key = row[colIndex1];
-            // Use the value in the given column as the hash key
-            hashTable[key].push_back(row);
+            string key = tableOneRows[i][colIndex1];
+            hashTable[key].push_back(i);  // Store index instead of full row
         }
 
         // Now, look at second table and join based on colIndex1 and 2
         // Add to the "joined" table if we have a matching column value
-        for (vector<string> rowToAdd : tableTwo.getAllRows())  
+        const vector<vector<string>>& tableTwoRows = tableTwo.getAllRows();
+        for (int j = 0; j < tableTwoRows.size(); j++)
         {
+            const auto& rowToAdd = tableTwoRows[j];
             string key = rowToAdd[colIndex2];
             // Use the value in the given column as the hash key
             if (hashTable.find(key) != hashTable.end())
             {
-                for (const auto& existingRow : hashTable[key])
-                {   // existingRow is a vector<string>
-                    // Add the extra values from tableTwo.getRow(row) to the existing row
-
+                for (int rowIdx : hashTable[key])
+                {
+                    const auto& existingRow = tableOneRows[rowIdx];
+                    // Add the extra values from tableTwo to the existing row
                     // colIndex2 is the index to not add to the extended row -- we don't want duplicates
-                    // We make a copy to avoid trying to edit the row we are adding
-
-                    vector<string> addCopy = rowToAdd;
-                    addCopy.erase(addCopy.begin() + colIndex2);
-                    vector<string> combined = combineRows(existingRow, addCopy);
+                    
+                    // Reserve space to avoid reallocations
+                    vector<string> combined;
+                    combined.reserve(existingRow.size() + rowToAdd.size() - 1);
+                    combined.insert(combined.end(), existingRow.begin(), existingRow.end());
+                    
+                    // Add rowToAdd except for the duplicate column
+                    for (int k = 0; k < rowToAdd.size(); k++)
+                    {
+                        if (k != colIndex2)
+                            combined.push_back(rowToAdd[k]);
+                    }
                     joined->addRow(combined);
                 }
             }
@@ -403,54 +476,24 @@ namespace cpu
     }
 }
 
-
-
-namespace gpu {
-    // __global__ Table* filter()
-    // {
-    //     int thread = threadIdx.x; // ?
-    // }
-    
-    // The following methods will call the relevant kernels, figuring out the correct number of blocks, threads, etc. 
-    Table* filter(Table& toFilter, string column, string target)
-    {
-        Table* result;
-        // Create pointers in the GPU
-
-        // Allocate Memory in the GPU
-
-        // Copy the vectors into the GPU
-
-        return result;
-    }
-
-    vector<string> combineRows(vector<string> existingRow, vector<string> rowToAdd)
-    {
-        vector<string> result;
-
-        return result;
-    }
-
-    Table* aggregate(Table& toGroup, string groupByCol, string toAggCol, AggType function)
-    {
-        Table* result;
-        return result;
-    }
-
-    Table* hash_join(Table& tableOne, Table& tableTwo, string columnIndex1, string columnIndex2)
-    {
-        Table* result;
-        return result;
-    }
-}
-
 void runCPU()
 {
     // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2015-01.csv", 500);
+    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 1000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    // Table* table_2015 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2015-01.csv", 500);
+    if (!table_2015) {
+        cerr << "Failed to load table_2015" << endl;
+        return;
+    }
     table_2015->appendStringtoColumns("2015");
 
-    Table* table_2016 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2016-01.csv", 500);
+    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 1000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    // Table* table_2016 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2016-01.csv", 500);
+    if (!table_2016) {
+        cerr << "Failed to load table_2016" << endl;
+        delete table_2015;
+        return;
+    }
     table_2016->appendStringtoColumns("2016");
 
     // START CLOCK
@@ -458,13 +501,27 @@ void runCPU()
     auto startFilter = chrono::high_resolution_clock::now();
     // STEP 1: FILTER
     Table* solo_15 = cpu::filter(*table_2015, "2015_passenger_count", "1");
+    if (!solo_15) {
+        cerr << "CPU filter returned nullptr" << endl;
+        delete table_2015;
+        delete table_2016;
+        return;
+    }
     auto endFilter = chrono::high_resolution_clock::now();
     auto usFilter = std::chrono::duration_cast<chrono::microseconds>(endFilter - startFilter);
     cout << endl << endl << "CPU Time to Filter 2015 table: " << usFilter.count() << " μs \n";
     cout << "Number of rows = " << (solo_15->getNumRows()) << endl;
 
-    writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written15.csv", *solo_15);
-    Table* solo_16 = cpu::filter(*table_2016, "2016_passenger_count", "1");    
+    // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written15.csv", *solo_15);
+    Table* solo_16 = cpu::filter(*table_2016, "2016_passenger_count", "1");
+    if (!solo_16) {
+        cerr << "CPU filter returned nullptr" << endl;
+        delete table_2015;
+        delete table_2016;
+        delete solo_15;
+        return;
+    }
+    cout << "Number of rows = " << (solo_16->getNumRows()) << endl;    
          // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written16.csv", *solo_16);
 
    
@@ -473,6 +530,14 @@ void runCPU()
     // TODO: potentially create a new column with location + distance as a joiner.
     auto startJoin = chrono::high_resolution_clock::now();
     Table* joined = cpu::hash_join(*solo_15, *solo_16, "2015_trip_distance", "2016_trip_distance");
+    if (!joined) {
+        cerr << "CPU hash_join returned nullptr" << endl;
+        delete table_2015;
+        delete table_2016;
+        delete solo_15;
+        delete solo_16;
+        return;
+    }
         // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/joined.csv", *joined); // joined->printTable();
     auto endJoin = chrono::high_resolution_clock::now();
     auto msJoin = std::chrono::duration_cast<std::chrono::milliseconds>(endJoin - startJoin);
@@ -482,6 +547,15 @@ void runCPU()
 
     auto startAgg = chrono::high_resolution_clock::now();
     Table* agg = cpu::aggregate(*joined, "2015_VendorID", "2015_fare_amount", AVG);
+    if (!agg) {
+        cerr << "CPU aggregate returned nullptr" << endl;
+        delete table_2015;
+        delete table_2016;
+        delete solo_15;
+        delete solo_16;
+        delete joined;
+        return;
+    }
         // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/aggregate.csv", *agg); // joined->printTable();
     auto endAgg = chrono::high_resolution_clock::now();
     auto msAgg = std::chrono::duration_cast<std::chrono::milliseconds>(endAgg - startAgg);
@@ -498,98 +572,7 @@ void runCPU()
     delete agg;
 }
 
-void runGPU()
-{
-    // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2015-01.csv", 300);
-    table_2015->appendStringtoColumns("2015");
-
-    Table* table_2016 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2016-01.csv", 300);
-    table_2016->appendStringtoColumns("2016");
-
-    // START CLOCK
-    // TIME THE GPU
-    auto start = chrono::high_resolution_clock::now();
-
-    // STEP 1: FILTER
-    Table* solo_15 = gpu::filter(*table_2015, "2015_passenger_count", "1");
-        // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written15_GPU.csv", *solo_15);
-    Table* solo_16 = gpu::filter(*table_2016, "2016_passenger_count", "1");    
-         // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written16_GPU.csv", *solo_16);
-
-    // STEP 2: JOIN - Joining January 2015 and 2016 data for single passengers
-    // TODO: potentially create a new column with location + distance as a joiner.
-    Table* joined = gpu::hash_join(*solo_15, *solo_16, "2015_trip_distance", "2016_trip_distance");
-        // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/joined_GPU.csv", *joined); // joined->printTable();
-
-
-    // STEP 3: AGGREGATE
-    Table* agg = gpu::aggregate(*joined, "2015_VendorID", "2015_fare_amount", AVG);
-        // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/aggregate_GPU.csv", *agg); // joined->printTable();
-    
-    auto end = chrono::high_resolution_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    cout << endl << endl << "GPU Time: " << ms.count() << " ms\n";
-
-    
-    // Clean up memory
-    delete table_2015;
-    delete table_2016;
-    delete solo_15;
-    delete solo_16;
-    delete joined;
-    delete agg;
-}
-
-void testingMySQL()
-{
-    vector<string> colNames = {
-        "trip_id", 
-        "VendorID",
-        "fare",
-        "passengers",
-    };
-
-    // Hard-coding rows here for now.
-    Table* mainTable = new Table(colNames);
-    mainTable->addRow({"1", "2", "15", "1"});
-    mainTable->addRow({"2", "1", "22", "2"});
-    mainTable->addRow({"3", "2", "8", "1"});
-    mainTable->addRow({"4", "1", "30", "3"});
-    // Print Table
-    cout<< "mainTable" << endl;
-    mainTable->printTable();
-    cout << endl;
-
-
-
-    vector<string> colNames2 = {"VendorID", "vendor_name", "commission"};
-    Table* two = new Table(colNames2);
-    two->addRow({"1", "Creative Mobile", "5%"});
-    two->addRow({"2", "VeriFone", "3%"});
-    // Print Table
-    cout<< "two" << endl;
-    two->printTable();
-    cout << endl;
-
-    // Testing filter()
-            // dereferencing mainTable because we never want to allow nullptr
-    Table* temp = cpu::filter(*mainTable, "passengers", "1");
-    temp->printTable();
-
-    temp = cpu::hash_join(*mainTable, *two, "VendorID", "VendorID"); cout << endl << endl;
-    temp->printTable();
-}
-
 int main()
 {
     runCPU();
-
-    // TODO: edit so that timer is only timing the SQL queries
-    auto startGPU = chrono::high_resolution_clock::now();
-    // runGPU();
-    auto endGPU = chrono::high_resolution_clock::now();
-    auto msGPU = std::chrono::duration_cast<std::chrono::milliseconds>(endGPU - startGPU);
-
-    cout << endl << endl << "GPU Time: " << msGPU.count() << " ms\n";
 }
