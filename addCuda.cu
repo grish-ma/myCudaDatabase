@@ -338,7 +338,7 @@ void hash_join_kernel(
 
     for (int k = 0; k < tableSize; k++) // Going through all the rows of the hashTable/tableOne
     {
-        if (fabs(key-keys[k]) < 0.1)
+        if (fabs(key-keys[k]) < 0.9)
         {
             int pos = atomicAdd(count, 1); // added a row to the output table. cannot do count++ in GPU.
             if (pos >= numRowsTwo) {
@@ -381,7 +381,6 @@ namespace gpu
 
     Table* hash_join(Table& tableOne, Table& tableTwo, string columnIndex1, string columnIndex2)
     {
-        cout << "Here I am!" << endl;
         // Flatten our Tables to 1D // return vector<double> since GPU cannot process strings
         vector<double> flatOne = tableOne.flatten();
         vector<double> flatTwo = tableTwo.flatten();
@@ -390,7 +389,7 @@ namespace gpu
         // TO-DO -- do this hashtable thing in the GPU
         int colIndex1 = tableOne.getColumnIndex(columnIndex1);
         int colIndex2 = tableTwo.getColumnIndex(columnIndex2);
-        cout << "Finding columns" << columnIndex1 << "=" << colIndex1 << " and " << columnIndex2 << "=" << colIndex2 << endl;
+        // cout << "Finding columns" << columnIndex1 << "=" << colIndex1 << " and " << columnIndex2 << "=" << colIndex2 << endl;
 
         if (colIndex1 == -1 || colIndex2 == -1)
         {
@@ -402,14 +401,13 @@ namespace gpu
         // Concatenate the columns from both tables:
         newCols.insert(newCols.end(), twoCols.begin(), twoCols.end());
         // Removing the duplicate column:
-        newCols.erase(newCols.begin() + colIndex1);
-        cout << "newCols.size() = " << newCols.size() << endl;
-        
+        newCols.erase(newCols.begin() + colIndex2);
+
         Table* joined = new Table(newCols);
         // unordered_map<string, vector<vector<string>>> hashTable;
         vector<double> vectorHashKeys;
         Table* vectorHashValues = new Table(tableOne.getAllCols()); // Will contain all the row indices from tableOne
-        
+
         // Go through tableOne and store all the elements in the
         // right spots based on the given colIndex
         // + Now convert to what we can use in the GPU.
@@ -425,11 +423,12 @@ namespace gpu
             vectorHashKeys.push_back(stod(key)); //  only recording row index in hashtable
             vectorHashValues->addRow(row); // pushing entire row
         }
-        cout << "hello...??" << endl;
         vector<double> flatValues = vectorHashValues->flatten();
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
-        cout << "bob ross" << endl;
+        // TIME THE GPU - including memory transfer
+        auto startMem = chrono::high_resolution_clock::now();
+
         // Create pointers in the GPU. Parameters of the hash_join_kernel(). If its value doesn't need to change, don't need a pointer.
         // Any output values you want should be pointers and sent as parameters to __global__ function
         int* d_count;
@@ -440,23 +439,22 @@ namespace gpu
         double* outValues_ptr;
 
         // Allocate Memory in the GPU for all the pointers: cudaMalloc(&ptr, N * sizeof(type)); → type = type of ELEMENTS, size = # of bytes = # of elements * sizeof(double)
-        cout << "alok" << endl;
         cudaMalloc(&tableTwo_ptr, flatTwo.size() * sizeof(double));
         cudaMalloc(&keys_ptr, vectorHashKeys.size()*sizeof(double));
               int maxOutRows = tableTwo.getNumRows();
         cudaMalloc(&outKeys_ptr, sizeof(double) * maxOutRows);
-                            // int maxOutSize = flatValues.size() + flatTwo.size();  
+                            // int maxOutSize = flatValues.size() + flatTwo.size();
                             // cudaMalloc(&outKeys_ptr, (maxOutSize)*sizeof(double));
             // Allocating max size possible
         cudaMalloc(&values_ptr, flatValues.size()*sizeof(double));
-        cudaMalloc(&outValues_ptr, sizeof(double) * maxOutRows * newCols.size());
+                int maxOutputSize = tableOne.getNumRows() * tableTwo.getNumRows();
+        cudaMalloc(&outValues_ptr, sizeof(double) * maxOutputSize * newCols.size());
 
-        
+
                             // cudaMalloc(&outValues_ptr, flatValues.size()*sizeof(double));
             // Allocating max size possible
         cudaMalloc(&d_count, sizeof(int));
             cudaMemset(d_count, 0, sizeof(int)); // initialize to 0
-        cout << "Rock climbing" << endl;
         // Copy the vectors into the GPU using cudaMemcpy(..., cudaMemcpyHostToDevice)
             // Only need to copy input values, not empty output pointers
         cudaMemcpy(tableTwo_ptr, flatTwo.data(), flatTwo.size()*sizeof(double), cudaMemcpyHostToDevice);
@@ -466,9 +464,18 @@ namespace gpu
         // Call the kernel function
      //   int threads = tableTwo.getNumRows();
       //  int blocks = 1; //(num_rows + threads - 1) / threads;
-        int threads = 256; 
+        int threads = 256;
         int blocks = (tableTwo.getNumRows() + threads - 1) / threads;
-        cout << "Before the kernel " << endl;
+
+        // TIMING PURPOSES
+        // Create CUDA events
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        // Record start
+        cudaEventRecord(start);
+
         hash_join_kernel<<<blocks, threads>>>(
             d_count,
             tableTwo_ptr,
@@ -483,19 +490,49 @@ namespace gpu
             tableTwo.getNumRows());
         cudaDeviceSynchronize();
 
+        // Record end
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+
+        // Calculating CUDA Event Time
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start, stop);
+        cout << "GPU Hash Join Kernel Time: " << ms << " ms\n";
+
+        // Cleanup
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             cout << "CUDA Error: " << cudaGetErrorString(err) << endl;
         }
 
         // Copy results back to CPU using cudaMemcpy(..., cudaMemcpyDeviceToHost)
-        int resultCount;
+        int resultCount = 0;
+        int outCols = (int)newCols.size(); // number of columns in joined table
+
         cudaMemcpy(&resultCount, d_count, sizeof(int), cudaMemcpyDeviceToHost);
-        // vector<double> keysResult = vector<double>(resultCount);
-        vector<double> valuesResult = vector<double>(resultCount);
-        // cudaMemcpy(keysResult.data(), outKeys_ptr, keysResult.size()*sizeof(double), cudaMemcpyDeviceToHost);
+                // vector<double> keysResult = vector<double>(resultCount);
+                // cudaMemcpy(keysResult.data(), outKeys_ptr, keysResult.size()*sizeof(double), cudaMemcpyDeviceToHost);
+        cout << "Hash Join resultCount = " << resultCount << endl;
+
+        vector<double> valuesResult;
+        if (resultCount > 0) {
+            // allocate host buffer of the full size: rows * columns
+            valuesResult.assign((size_t)resultCount * outCols, 0.0);
+            // copy the full block back
+            cudaMemcpy(valuesResult.data(),
+                       outValues_ptr,
+                       valuesResult.size() * sizeof(double),
+                       cudaMemcpyDeviceToHost);
+        }
         cudaMemcpy(valuesResult.data(), outValues_ptr, resultCount*sizeof(double), cudaMemcpyDeviceToHost);
 
+        // Calculate total time including memory transfers
+        auto endMem = chrono::high_resolution_clock::now();
+        auto msTotal = std::chrono::duration_cast<std::chrono::milliseconds>(endMem - startMem);
+        cout << "GPU Hash Join Time With Memory Transfer: " << msTotal.count() << " ms\n";
 
         cudaFree(d_count);
         cudaFree(tableTwo_ptr);
@@ -506,9 +543,7 @@ namespace gpu
 
 
         // Unflatten Tables if needed
-        cout << "Before unflattening table" << endl;
         joined = Table::fromFlattened(valuesResult, newCols, resultCount);
-        cout << "After unflattening table" << endl;
 
         return joined;
     }
@@ -533,7 +568,7 @@ namespace gpu
         double target_dbl; // = stod(target); // convert target value to double // value doesn't change
         try { target_dbl = stod(target); } catch(...) { target_dbl = 0.0; cerr << "Trying to convert a non-numeric value to a double.";}
         int colIndex = toFilter.getColumnIndex(column); // no pointer because it's value doesn't need to change
-        cout << "colIndex: " << colIndex << endl;
+        // cout << "colIndex: " << colIndex << endl;
         int num_rows = toFilter.getNumRows(); // value doesn't change
         int num_cols = toFilter.getNumCols(); // value doesn't change
         int* d_count; // Keeps count of the number of rows in the filtered table.
@@ -606,7 +641,6 @@ namespace gpu
 
       // Calculating Clock Time
         auto msFilter = std::chrono::duration_cast<std::chrono::milliseconds>(endFilter - startFilter);
-      //  cout << endl << endl << "GPU Time to Filter table: " << msFilter.count() << " ms\n";
         msFilter = std::chrono::duration_cast<std::chrono::milliseconds>(endFilter - startMem);
         cout << endl << endl << "GPU Time to Filter table With Memory Transfer: " << msFilter.count() << " ms\n";
       // Calculating CUDA Event Time
@@ -649,26 +683,28 @@ namespace gpu
 void runGPU()
 {
     // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 50, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 100000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     table_2015->appendStringtoColumns("2015");
             // table_2015->printTable();
-    cout << endl << "value = " << table_2015->getValue(0, 1) << endl;
 
-    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 50, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 100000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     table_2016->appendStringtoColumns("2016");
 
 
     // STEP 1: FILTER
     Table* solo_15 = gpu::filter(*table_2015, "2015_passenger_count", "1");
       // solo_15->printTable();
+    int temp = solo_15->getNumRows();
+    cout << "Number of rows in filtered 2015 table = " << (temp) << endl;
     Table* solo_16 = gpu::filter(*table_2016, "2016_passenger_count", "1");
       // solo_16->printTable();
+    temp = solo_16->getNumRows();
+    cout << "Number of rows in filtered 2016 table = " << (temp) << endl;
 
 
     // STEP 2: JOIN
     Table* joined = gpu::hash_join(*solo_15, *solo_16, "2015_trip_distance", "2016_trip_distance");
-    joined->printTable();
-    cout << endl << "Test" << endl;
+    // joined->printTable();
 }
 
 int main()
