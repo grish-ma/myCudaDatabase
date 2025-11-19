@@ -1,10 +1,4 @@
-%%writefile queries.cpp
-// Queries to write:
-
-// Version 1 -- 
-// CREATE TABLE table_name (~~~~)
-// SELECT (DISTINCT) col1, col2, ... // or use * for all 
-// FROM table
+%%writefile queries_with_openmp.cpp
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -14,6 +8,7 @@
 #include <unordered_map>
 #include <numeric>
 #include <chrono>
+#include <omp.h>
 
 // Using Google Colab to run CUDA
 // #include "cuda_runtime.h"
@@ -338,10 +333,7 @@ namespace cpu
         const vector<string>& cols = toFilter.getAllCols();
         Table* filtered = new Table(cols); // Make a new table with the same column names
         const vector<vector<string>>& allRows = toFilter.getAllRows();
-        
-        // Pre-allocate space to reduce reallocations (estimate ~50% match rate)
-        // Access private member through a workaround - we'll use reserve if we add a method
-        // For now, just iterate efficiently
+        // Pre-allocate space to reduce reallocations
         for (const auto& tempRow : allRows)
         {
             if (tempRow[columnIndex] == target)
@@ -414,6 +406,43 @@ namespace cpu
         return grouped;
     }
 
+    Table* openmp_filter(Table& toFilter, string column, string target)
+    {
+        int columnIndex = toFilter.getColumnIndex(column);
+        if (columnIndex == -1)
+            return nullptr;
+
+        const vector<string>& cols = toFilter.getAllCols();
+        const vector<vector<string>>& allRows = toFilter.getAllRows();
+        int N = toFilter.getNumRows();
+        
+        Table* filtered = new Table(cols);
+        
+        #pragma omp parallel
+        {
+            vector<vector<string>> localRows;
+            localRows.reserve(N / omp_get_num_threads() + 1);
+            
+            #pragma omp for nowait
+            for (int j = 0; j < N; j++)
+            {
+                if (allRows[j][columnIndex] == target)
+                {
+                    localRows.push_back(allRows[j]);
+                }
+            }
+            
+            #pragma omp critical
+            {
+                for (const auto& row : localRows)
+                {
+                    filtered->addRow(row);
+                }
+            }
+        }
+        return filtered;
+    }
+
     // Making wider rows based on column value
     Table* hash_join(Table& tableOne, Table& tableTwo, string columnIndex1, string columnIndex2)
     {
@@ -479,15 +508,17 @@ namespace cpu
 void runCPU()
 {
     // STEP 0: LOADING DATA - Load first 10 rows of New York Taxi Dataset - 2015
-    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 1000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2015 = loadCSV("/content/yellow_tripdata_2015-01.csv", 10000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     // Table* table_2015 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2015-01.csv", 500);
+    cout << "Reading in 10,000 rows" << endl << endl; 
+
     if (!table_2015) {
         cerr << "Failed to load table_2015" << endl;
         return;
     }
     table_2015->appendStringtoColumns("2015");
 
-    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 1000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
+    Table* table_2016 = loadCSV("/content/yellow_tripdata_2016-01.csv", 10000, {"VendorID", "passenger_count", "payment_type", "trip_distance", "fare_amount"});
     // Table* table_2016 = loadCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/yellow_tripdata_2016-01.csv", 500);
     if (!table_2016) {
         cerr << "Failed to load table_2016" << endl;
@@ -524,8 +555,17 @@ void runCPU()
     cout << "Number of rows = " << (solo_16->getNumRows()) << endl;    
          // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/written16.csv", *solo_16);
 
-   
-    
+    // Trying filtering with OpenMP
+    // OpenMP will spawn the maximum number of threads possible
+    auto startOpenMP = chrono::high_resolution_clock::now();
+    Table* openmp_result = cpu::openmp_filter(*table_2015, "2015_passenger_count", "1");
+    auto endOpenMP = chrono::high_resolution_clock::now();
+    auto usOpenMP = std::chrono::duration_cast<chrono::microseconds>(endOpenMP - startOpenMP);
+    cout << endl << endl << "Filtering with OpenMP. Number of rows = " << (openmp_result->getNumRows()) << endl;
+    cout << endl << "OpenMP Filter Time: " << usOpenMP.count() << " μs" << endl;
+    delete openmp_result;
+
+
          // STEP 2: JOIN - Joining January 2015 and 2016 data for single passengers
     // TODO: potentially create a new column with location + distance as a joiner.
     auto startJoin = chrono::high_resolution_clock::now();
@@ -559,7 +599,7 @@ void runCPU()
         // writeCSV("C:/Users/grish/OneDrive/Desktop/GitHub/myCudaDatabase/CSV/aggregate.csv", *agg); // joined->printTable();
     auto endAgg = chrono::high_resolution_clock::now();
     auto msAgg = std::chrono::duration_cast<std::chrono::milliseconds>(endAgg - startAgg);
-    cout << endl << endl << "CPU Time to Aggregate joined table: " << msJoin.count() << " ms\n";
+    cout << endl << endl << "CPU Time to Aggregate joined table: " << msAgg.count() << " ms\n";
     agg->printTable();
     
     
